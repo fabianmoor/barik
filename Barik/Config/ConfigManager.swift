@@ -7,15 +7,112 @@ final class ConfigManager: ObservableObject {
 
     @Published private(set) var config = Config()
     @Published private(set) var initError: String?
+    @Published var customFileContent: String = "Loading..." // New property
     
     private var fileWatchSource: DispatchSourceFileSystemObject?
     private var fileDescriptor: CInt = -1
     private var configFilePath: String?
+    
+    private var customFileWatchSource: DispatchSourceFileSystemObject? // For custom file
+    private var customFileDescriptor: CInt = -1 // For custom file
+    private var customStatusFilePath: String? // Path to your custom file
+
 
     private init() {
         loadOrCreateConfigIfNeeded()
+        setupCustomStatusFile()
     }
+    
+    private func setupCustomStatusFile() {
+           let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+           // Define the path to your custom status file
+           // For now, let's hardcode it. Later you could make this configurable via barik-config.toml
+           let path = "\(homePath)/.config/skhd/scripts/active_mode" // Or read from main config
+           self.customStatusFilePath = path
 
+           if !FileManager.default.fileExists(atPath: path) {
+               // Create an empty file or default content if it doesn't exist
+               do {
+                   try "default".write(toFile: path, atomically: true, encoding: .utf8)
+                   print("Created default custom status file at \(path)")
+               } catch {
+                   print("Error creating custom status file: \(error)")
+                   DispatchQueue.main.async {
+                       self.customFileContent = "Error: No file"
+                   }
+                   return
+               }
+           }
+           loadCustomFileContent(at: path)
+           startWatchingCustomFile(at: path)
+       }
+
+    private func loadCustomFileContent(at path: String) {
+            do {
+                let content = try String(contentsOfFile: path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    self.customFileContent = content.isEmpty ? "Empty" : content
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.customFileContent = "Error reading file"
+                }
+                print("Error reading custom status file: \(error)")
+            }
+        }
+
+        private func startWatchingCustomFile(at path: String) {
+            // Close existing watcher if any
+            if customFileDescriptor != -1 {
+                customFileWatchSource?.cancel()
+                close(customFileDescriptor)
+                customFileDescriptor = -1
+            }
+
+            customFileDescriptor = open(path, O_EVTONLY)
+            if customFileDescriptor == -1 {
+                print("Error: Could not open custom status file for watching at \(path)")
+                DispatchQueue.main.async {
+                    self.customFileContent = "Watch Error"
+                }
+                return
+            }
+
+            customFileWatchSource = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: customFileDescriptor,
+                eventMask: [.write, .delete, .rename], // Watch for more events
+                queue: DispatchQueue.global()
+            )
+
+            customFileWatchSource?.setEventHandler { [weak self] in
+                guard let self = self, let watchedPath = self.customStatusFilePath else { return }
+                // Check if file still exists
+                if !FileManager.default.fileExists(atPath: watchedPath) {
+                    DispatchQueue.main.async {
+                        self.customFileContent = "File Deleted"
+                    }
+                     // Optionally, try to re-establish watch or handle deletion
+                    self.customFileWatchSource?.cancel() // Stop watching if deleted
+                    if self.customFileDescriptor != -1 {
+                        close(self.customFileDescriptor)
+                        self.customFileDescriptor = -1
+                    }
+                    // Attempt to re-setup (might lead to loops if file is rapidly deleted/recreated)
+                    // self.setupCustomStatusFile()
+                    return
+                }
+                self.loadCustomFileContent(at: watchedPath)
+            }
+
+            customFileWatchSource?.setCancelHandler { [weak self] in
+                if let fd = self?.customFileDescriptor, fd != -1 {
+                    close(fd)
+                    self?.customFileDescriptor = -1
+                }
+            }
+            customFileWatchSource?.resume()
+        }
+    
     private func loadOrCreateConfigIfNeeded() {
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
         let path1 = "\(homePath)/.barik-config.toml"
@@ -72,6 +169,7 @@ final class ConfigManager: ObservableObject {
             displayed = [ # widgets on menu bar
                 "default.spaces",
                 "spacer",
+                "custom.file_status",
                 "default.network",
                 "default.battery",
                 "divider",

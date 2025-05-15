@@ -70,7 +70,9 @@ struct MenuBarView: View {
 
         case "system-banner":
             SystemBannerWidget()
-
+            
+        case "custom.file_status": // Your new widget ID
+            CustomFileTextWidget()
         default:
             Text("?\(item.id)?").foregroundColor(.red)
         }
